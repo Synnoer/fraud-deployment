@@ -5,8 +5,8 @@ import time
 import math
 from collections import deque
 
-API_URL_WARMUP = "http://localhost:8000/warmup"
-API_URL_STREAM = "http://localhost:8000/predict_stream"
+API_URL_WARMUP = "https://cnn-gru-829168846186.asia-southeast2.run.app/warmup"
+API_URL_STREAM = "https://cnn-gru-829168846186.asia-southeast2.run.app/predict_stream"
 
 st.set_page_config(page_title="Real-Time Fraud Detection Simulation", layout="wide")
 st.title("Real-Time Fraud Monitoring Simulation")
