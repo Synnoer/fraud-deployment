@@ -5,9 +5,10 @@ import requests
 import time
 import threading
 from collections import deque
+from datetime import datetime
 
-API_URL_WARMUP = "https://cnn-gru-v2-829168846186.asia-southeast2.run.app/warmup"
-API_URL_STREAM = "https://cnn-gru-v2-829168846186.asia-southeast2.run.app/predict_stream"
+API_URL_WARMUP = "https://cnn-gru-829168846186.asia-southeast2.run.app/warmup"
+API_URL_STREAM = "https://cnn-gru-829168846186.asia-southeast2.run.app/predict_stream"
 
 BASE_RATE_RPS    = 2.0
 BURST_PROB       = 0.08
@@ -91,13 +92,13 @@ if warmup_file is not None and stream_file is not None:
         def update_ui(result: dict):
             prob   = result.get("Fraud_Probability", 0.0)
             uid    = result.get("uid", "—")
-            dt_h   = round(result.get("TransactionDT", 0) / 3600, 2)
+            local_time = datetime.now().strftime("%H:%M:%S")
             status = "🚨 FRAUD" if prob > 0.68 else "✅ CLEAR"
 
             score_history.append(prob)
             table_data.insert(0, {
                 "UID":      uid,
-                "Time":     f"{dt_h}h",
+                "Time":     local_time,
                 "Score":    round(prob, 4),
                 "Status":   status,
                 "API ms":   round(result["_wall_ms"], 1),
@@ -117,7 +118,7 @@ if warmup_file is not None and stream_file is not None:
             with metrics_placeholder.container():
                 r1 = st.columns(4)
                 r1[0].metric("UID",             str(uid))
-                r1[1].metric("Time (h)",        f"{dt_h}h")
+                r1[1].metric("Time",            local_time)
                 r1[2].metric("Status",          status, delta=f"{prob:.4f}")
                 r1[3].metric("RPS (live)",      str(rps))
 
@@ -129,7 +130,7 @@ if warmup_file is not None and stream_file is not None:
 
                 r3 = st.columns(3)
                 r3[0].metric("Total sent",      str(n))
-                r3[1].metric("High-risk (>0.68)",
+                r3[1].metric("High-risk (>0.45)",
                              str(sum(s > 0.68 for s in score_history)))
                 r3[2].metric("Rows remaining",  str(rows_remaining[0]))
 
