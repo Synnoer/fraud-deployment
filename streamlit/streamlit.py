@@ -7,8 +7,8 @@ import threading
 from collections import deque
 from datetime import datetime
 
-API_URL_WARMUP = "https://cnn-gru-829168846186.asia-southeast2.run.app/warmup"
-API_URL_STREAM = "https://cnn-gru-829168846186.asia-southeast2.run.app/predict_stream"
+API_URL_WARMUP = "https://cnn-gru-v2-829168846186.asia-southeast2.run.app/warmup"
+API_URL_STREAM = "https://cnn-gru-v2-829168846186.asia-southeast2.run.app/predict_stream"
 
 BASE_RATE_RPS    = 2.0
 BURST_PROB       = 0.08
