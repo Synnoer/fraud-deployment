@@ -5,7 +5,7 @@ import requests
 import time
 import threading
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 API_URL_WARMUP = "https://cnn-gru-v2-829168846186.asia-southeast2.run.app/warmup"
 API_URL_STREAM = "https://cnn-gru-v2-829168846186.asia-southeast2.run.app/predict_stream"
@@ -14,6 +14,9 @@ BASE_RATE_RPS    = 2.0
 BURST_PROB       = 0.08
 BURST_SIZE_RANGE = (5, 20)
 BURST_COOLDOWN   = 3.0
+
+# Jakarta timezone = UTC+7, matching GCP asia-southeast2
+WIB = timezone(timedelta(hours=7))
 
 st.set_page_config(page_title="Real-Time Fraud Detection Simulation", layout="wide")
 st.title("Real-Time Fraud Monitoring Simulation")
@@ -50,16 +53,17 @@ if warmup_file is not None and stream_file is not None:
         st.markdown("---")
         st.subheader("Live Incoming Transactions")
 
-        metrics_placeholder = st.empty()
-        chart_placeholder   = st.empty()
-        table_placeholder   = st.empty()
+        metrics_placeholder  = st.empty()
+        chart_placeholder    = st.empty()
+        table_placeholder    = st.empty()
+        download_placeholder = st.empty()
 
         # ── Shared state ───────────────────────────────────────────────────
         api_latencies   = []
         model_latencies = []
         request_times   = deque(maxlen=500)
         score_history   = []
-        table_data      = []
+        all_predictions = []   # ← full unbounded history for download
         last_burst_time = 0.0
         row_iter        = df_stream.iterrows()
         rows_remaining  = [len(df_stream)]
@@ -90,22 +94,26 @@ if warmup_file is not None and stream_file is not None:
                 return None
 
         def update_ui(result: dict):
-            prob   = result.get("Fraud_Probability", 0.0)
-            uid    = result.get("uid", "—")
-            local_time = datetime.now().strftime("%H:%M:%S")
-            status = "🚨 FRAUD" if prob > 0.68 else "✅ CLEAR"
+            prob       = result.get("Fraud_Probability", 0.0)
+            uid        = result.get("uid", "—")
+            # Jakarta time (WIB, UTC+7) — same clock as GCP asia-southeast2
+            wib_time   = datetime.now(tz=WIB)
+            time_str   = wib_time.strftime("%H:%M:%S")
+            time_full  = wib_time.strftime("%Y-%m-%d %H:%M:%S %Z")
+            status     = "🚨 FRAUD" if prob > 0.68 else "✅ CLEAR"
 
             score_history.append(prob)
-            table_data.insert(0, {
-                "UID":      uid,
-                "Time":     local_time,
-                "Score":    round(prob, 4),
-                "Status":   status,
-                "API ms":   round(result["_wall_ms"], 1),
-                "Model ms": round(result.get("model_latency_ms", 0), 2),
-            })
-            if len(table_data) > 12:
-                table_data.pop()
+
+            row = {
+                "UID":          uid,
+                "Time (WIB)":   time_full,
+                "Score":        round(prob, 4),
+                "Status":       status,
+                "API ms":       round(result["_wall_ms"], 1),
+                "Model ms":     round(result.get("model_latency_ms", 0), 2),
+            }
+            # ← Keep ALL rows for download
+            all_predictions.insert(0, row)
 
             now  = time.time()
             n    = len(api_latencies)
@@ -118,7 +126,7 @@ if warmup_file is not None and stream_file is not None:
             with metrics_placeholder.container():
                 r1 = st.columns(4)
                 r1[0].metric("UID",             str(uid))
-                r1[1].metric("Time",            local_time)
+                r1[1].metric("Time (WIB)",      time_str)
                 r1[2].metric("Status",          status, delta=f"{prob:.4f}")
                 r1[3].metric("RPS (live)",      str(rps))
 
@@ -137,8 +145,9 @@ if warmup_file is not None and stream_file is not None:
             chart_placeholder.line_chart(
                 score_history[-300:], height=220, use_container_width=True
             )
+            # Show only the latest 12 rows in the live table for readability
             table_placeholder.dataframe(
-                pd.DataFrame(table_data), use_container_width=True, hide_index=True
+                pd.DataFrame(all_predictions[:12]), use_container_width=True, hide_index=True
             )
 
         # ── Main streaming loop ────────────────────────────────────────────
@@ -148,12 +157,11 @@ if warmup_file is not None and stream_file is not None:
                 st.success("Stream complete — all transactions processed.")
                 break
 
-            now        = time.time()
+            now         = time.time()
             in_cooldown = (now - last_burst_time) < BURST_COOLDOWN
 
             if not in_cooldown and np.random.random() < BURST_PROB:
-                # Burst: collect rows then fire concurrently
-                burst_n       = int(np.random.randint(*BURST_SIZE_RANGE))
+                burst_n        = int(np.random.randint(*BURST_SIZE_RANGE))
                 burst_payloads = [payload]
                 for _ in range(burst_n - 1):
                     bp, remaining = pull_next_row()
@@ -186,3 +194,67 @@ if warmup_file is not None and stream_file is not None:
 
                 gap = np.random.exponential(1.0 / BASE_RATE_RPS)
                 time.sleep(gap)
+
+        # ── Post-stream: build download files ─────────────────────────────
+        n = len(api_latencies)
+
+        # 1) Full predictions CSV
+        df_predictions = pd.DataFrame(all_predictions)
+
+        # 2) Average metrics summary CSV
+        scores = [r["Score"] for r in all_predictions]
+        avg_metrics = {
+            "Metric":  [
+                "Total Transactions",
+                "High-risk (Fraud > 0.68)",
+                "Fraud Rate (%)",
+                "Avg Fraud Score",
+                "Avg API Latency (ms)",
+                "API p50 (ms)",
+                "API p95 (ms)",
+                "API p99 (ms)",
+                "Avg Model Latency (ms)",
+                "Model p50 (ms)",
+                "Model p95 (ms)",
+                "Model p99 (ms)",
+            ],
+            "Value": [
+                n,
+                int(sum(s > 0.68 for s in scores)),
+                round(100 * sum(s > 0.68 for s in scores) / n, 2) if n else 0,
+                round(float(np.mean(scores)), 4) if scores else 0,
+                round(float(np.mean(api_latencies)), 2) if n else 0,
+                round(float(np.percentile(api_latencies, 50)), 2) if n else 0,
+                round(float(np.percentile(api_latencies, 95)), 2) if n else 0,
+                round(float(np.percentile(api_latencies, 99)), 2) if n else 0,
+                round(float(np.mean(model_latencies)), 4) if n else 0,
+                round(float(np.percentile(model_latencies, 50)), 4) if n else 0,
+                round(float(np.percentile(model_latencies, 95)), 4) if n else 0,
+                round(float(np.percentile(model_latencies, 99)), 4) if n else 0,
+            ],
+        }
+        df_avg_metrics = pd.DataFrame(avg_metrics)
+
+        # ── Download buttons ───────────────────────────────────────────────
+        with download_placeholder.container():
+            st.markdown("---")
+            st.subheader("📥 Download Results")
+            dl1, dl2 = st.columns(2)
+
+            with dl1:
+                st.download_button(
+                    label=f"⬇️ All Predictions ({len(df_predictions):,} rows)",
+                    data=df_predictions.to_csv(index=False).encode("utf-8"),
+                    file_name="fraud_predictions_full.csv",
+                    mime="text/csv",
+                )
+
+            with dl2:
+                st.download_button(
+                    label="⬇️ Average Metrics Summary",
+                    data=df_avg_metrics.to_csv(index=False).encode("utf-8"),
+                    file_name="fraud_metrics_summary.csv",
+                    mime="text/csv",
+                )
+
+            st.dataframe(df_avg_metrics, use_container_width=True, hide_index=True)
